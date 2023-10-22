@@ -66,6 +66,7 @@ demand = {
         ('Dec', 'airfryers'): 14.8e3, ('Dec', 'breadmakers'): 10.6e3, ('Dec', 'coffeemakers'): 55.5e3,
     }
 
+
 # ---- Sets ----
 M = range(len(month))  # set of months
 P = range(len(productname))  # set of products
@@ -86,21 +87,15 @@ for m in M:
 #         for o in O:
 #             X2[m, p, o] = model.addVar(lb=0, vtype=GRB.CONTINUOUS, name='X2[' + str(m) + ',' + str(p) + ',' + str(o) + ']')
 
-W1 = {} # inventory finished
+W1 = {}  # inventory finished
 for m in M:
     for p in P:
-        if m == 0:
-            W1[m, p] = 0  # Set W1 to 0 when m is 0
-        else:
-            W1[m, p] = model.addVar(lb=0, vtype=GRB.CONTINUOUS, name='W1[' + str(m) + ',' + str(p) + ']')
-            
-W2 = {} # inventory packaged
+        W1[m, p] = model.addVar(lb=0, vtype=GRB.CONTINUOUS, name='W1[' + str(m) + ',' + str(p) + ']')
+
+W2 = {}  # inventory packaged
 for m in M:
     for p in P:
-        if m == 0:
-            W2[m, p] = 0
-        else:
-            W2[m, p] = model.addVar(lb=0, vtype=GRB.CONTINUOUS, name='W2[' + str(m) + ',' + str(p) + ']')
+        W2[m, p] = model.addVar(lb=0, vtype=GRB.CONTINUOUS, name='W2[' + str(m) + ',' + str(p) + ']')
 
 
 # Integrate new variables
@@ -109,41 +104,44 @@ model.update()
 # ---- Objective Function ----
 
 model.setObjective(gp.quicksum(
-    (holding_costs_finished[p] * W1[m, p]) + (holding_costs_packaged[p] * W2[m, p]) for m in M for p in P for o in O))
+    (holding_costs_finished[p] * W1[m, p]) + (holding_costs_packaged[p] * W2[m, p]) for m in M for p in P))
 model.modelSense = GRB.MINIMIZE
 model.update()
 
 # ---- Constraints ----
+
 # Constraints 1: demand constraint
+# Constraints 1: demand constraint for each month and product
 con1 = {}
 for m in M:
     for p in P:
-        con1[(m, p)] = model.addConstr(gp.quicksum(X1[m, p, 3] + W2[m, p] - demand[month[m], productname[p]] for o in O) >= 0)
-        
-# Constraints 2: capacity constraint
+        con1[m, p] = model.addConstr(X1[m, p, o] + W2[m, p] >= demand[month[m], productname[p]])
+    
+# Constraints 2: capacity constraint for each production step
 con2 = {}
-for p in P:
-    con2[p] = model.addConstr(gp.quicksum(time[productname[p], productionstep[o]] * X1[m, p, o] for m in M for o in O) <= capacity[p])
- 
+for m in M:
+    for o in O:
+        con2[m, o] = model.addConstr(gp.quicksum(time[productname[p], productionstep[o]] * (X1[m, p, o]) for p in P) <= capacity[o])
+
 # Constraints 3: Inventory balance constraint for finished products
 con3 = {}
 for p in P:
     for m in M:
         if m == 0:
-            con3[p, m] = model.addConstr(W1[m, p] == X1[m, p, 2])
+            con3[p, m] = model.addConstr(W1[m, p] == gp.quicksum(X1[m, p, 2] - X1[m, p, 3] for p in P))
         else:
-            con3[p, m] = model.addConstr(W1[m, p] == X1[m, p, 2] - X1[m, p, 3])
+            con3[p, m] = model.addConstr(W1[m, p] == gp.quicksum( W1[m - 1, p] + X1[m, p, 2] - X1[m, p, 3] for p in P))
 
 # Constraints 4: Inventory balance constraint for packaged products
 con4 = {}
-for m in M:
-    for p in P:
+for p in P:
+    for m in M:
         if m == 0:
-            con4[p, m] = model.addConstr(W2[m, p] == X1[m, p, 3])
+            con4[m, p] = model.addConstr(W2[m, p] == (gp.quicksum(X1[m, p, 3] - demand[month[m], productname[p]] for p in P)))
         else:
-            con4[p, m] = model.addConstr(W2[m, p] == W2[m - 1, p] + X1[m, p, 2])
-   
-      
+            con4[m, p] = model.addConstr(W2[m, p] == (gp.quicksum(W2[m - 1, p] + X1[m, p, 3] - demand[month[m], productname[p]] for p in P)))
+
+
 # Constraints 5: First three production steps in the same month
 con5 = {}
 for m in M:
@@ -151,19 +149,7 @@ for m in M:
         con5[p, m, o] = model.addConstr(X1[m, p, 0] == X1[m, p, 1])
         con5[p, m, o] = model.addConstr(X1[m, p, 1] == X1[m, p, 2])
 
-# Constraints 6: Finished and packaged product storage and usage
-con6 = {}
-for m in M:
-    for p in P:
-        for o in O:
-            if m == 0:
-                con6[p, m, o] = model.addConstr(W1[m, p] == X1[m, p, 2])
-                con6[p, m, o] = model.addConstr(W2[m, p] == X1[m, p, 3])
-            else:
-                con6[p, m, o] = model.addConstr(W1[m, p] == X1[m, p, o])
-                con6[p, m, o] = model.addConstr(W2[m, p] == W1[m - 1, p] + X1[m, p, 3])
-                                                
-        
+
 # ---- Solve ----
 
 model.setParam( 'OutputFlag', True) # silencing gurobi output or not
@@ -181,10 +167,10 @@ production_schedule_packaged = {}
 if model.status == GRB.Status.OPTIMAL:
     for p in P:
         for m in M:
-            if isinstance(W1[m, p, 2], gp.Var):
-                production_schedule_finished[(month[m], productname[p])] = W1[m, p, 2].x
-            if isinstance(W2[m, p, 3], gp.Var):
-                production_schedule_packaged[(month[m], productname[p])] = W2[m, p, 3].x
+            if isinstance(W1[m, p], gp.Var):
+                production_schedule_finished[(month[m], productname[p])] = W1[m, p].x
+            if isinstance(W2[m, p], gp.Var):
+                production_schedule_packaged[(month[m], productname[p])] = W2[m, p].x
 
     # Now you can access the values as a dictionary
     print("\nProduction Schedule for Finished Products:")
